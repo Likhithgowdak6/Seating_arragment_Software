@@ -1,0 +1,80 @@
+name: smartseat
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: smartseat
+      POSTGRES_USER: smartseat
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U smartseat -d smartseat']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  redis:
+    image: redis:7-alpine
+    command: [redis-server, --save, '', --appendonly, 'no']
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://smartseat:${POSTGRES_PASSWORD}@db:5432/smartseat
+      REDIS_URL: redis://redis:6379/0
+      AUTO_CREATE_TABLES: 'false'
+      FRONTEND_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
+      COOKIE_SECURE: 'false'
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      HF_HOME: /models
+      LANGSMITH_TRACING: 'false'
+    volumes:
+      - models:/models
+      - ./backend/smartseat.db:/import/smartseat.db:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, python, -c, 'import urllib.request; urllib.request.urlopen("http://localhost:8000/api/health", timeout=5)']
+      interval: 15s
+      timeout: 8s
+      retries: 8
+      start_period: 30s
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+  web:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports: ['127.0.0.1:8080:8080']
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    security_opt: [no-new-privileges:true]
+  backup:
+    image: postgres:17-alpine
+    profiles: [tools]
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - ./backups:/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    entrypoint: [sh, -c]
+    command: ['pg_dump -h db -U smartseat -d smartseat -Fc -f /backups/smartseat-$$(date -u +%Y%m%dT%H%M%SZ).dump']
+volumes:
+  database:
+  models:
