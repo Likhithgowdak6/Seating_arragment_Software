@@ -1,0 +1,28 @@
+.venv/
+node_modules/
+dist/
+__pycache__/
+.pytest_cache/
+*.db
+*.db-journal
+*.tsbuildinfo
+.env
+*.log
+backups/
+
+# Credentials and local configuration
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+# Database sidecars and exports
+*.db-*
+*.sqlite
+*.sqlite3
+*.dump
+# Local tool artifacts
+.huggingface/
+.cache/
+coverage/
