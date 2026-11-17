@@ -5,7 +5,7 @@ Teacher and student portals for exam planning, with locally processed classroom 
 ## Run locally with Docker Desktop
 
 1. Open Docker Desktop and wait until its Linux engine is running.
-2. A private `.env` has been created with a generated database password. To activate the assistant, edit it and set `GROQ_API_KEY` to your Groq key. Never put this key into a chat form, source file or screenshot. `GROQ_MODEL` defaults to `llama-3.3-70b-versatile`.
+2. A private `.env` has been created with a generated database password. To activate the assistant, edit it and set `GROQ_API_KEY` to your Groq key. Never put this key into a chat form, source file or screenshot. `GROQ_MODEL` defaults to `openai/gpt-oss-20b`.
 3. From the project root:
 
 ```powershell
@@ -61,6 +61,8 @@ Add extra separation links for seats facing each other or nearby. The solver enf
 Manage > Students allows editing records and marking students as requiring an accessible seat. The solver reserves accessible placements for those students; it reports infeasibility rather than placing them in an unsuitable seat. No medical details are stored or sent to the assistant. Records used by a published exam must be unpublished before editing. Changes to room layouts or students invalidate affected draft seat plans.
 
 Password resets create a fresh temporary password, display it once to the teacher, revoke previous sessions and require a password change. For teacher recovery with local Docker owner access, run `docker compose exec -it backend python -m backend.recover_teacher`. It prompts privately for a new password, revokes sessions and records recovery in the audit log. Keep your teacher password and backups securely.
+
+Manage > Students also provides **Delete** beside Archive. Permanent deletion requires typing the USN in a confirmation dialog. It removes the student account, sessions, support settings, draft enrollments and related attendance, and clears affected draft seating. Students linked to published exams cannot be deleted until those exams are unpublished. Deleted students cannot be restored from Archive.
 
 Archive provides reversible removal for students, rooms and exams. Archived records are hidden from normal lists and cannot be newly selected. Student sessions are revoked when archived. Restore records from Manage > Archive. Published exam references block archiving to preserve seating charts.
 
@@ -121,3 +123,10 @@ In another terminal: `cd frontend`, `npm.cmd install`, then `npm.cmd run dev`. O
 At the user's request, no classroom/camera acceptance testing or functional regression suite was run for v0.4. TypeScript production build, Python syntax, migration application, Compose validation and container startup checks are recorded separately. Earlier test results do not certify these expanded features. Existing tests need CSRF-aware clients before rerunning because session protection changed.
 
 Not included: guaranteed reconstruction from arbitrary moving footage, a native mobile app, email-based self-service recovery, medical/accessibility detail collection, automatic invigilation or guarantees against copying. Groq activation requires your API key. Archive preserves history instead of permanently deleting records.
+
+
+### Improving small/rear desk detection
+
+The photo panel now offers furniture prompts, a 10-60% detection threshold (20% initially), and an enhanced three-pass scan. Enhanced mode detects on the whole image and two enlarged rear-room crops. Geometric suppression reduces repeated tabletop/whole-desk predictions and weak boxes covering groups. It does not prove the count is correct. Yellow dashed boxes have a model score below 30% and require extra review. Occluded desks, teacher furniture and unusual lab tables may still be missed or incorrectly included. Compare with the original image and correct suggestions before saving.
+
+Cached vision weights load locally without a network metadata check. CPU inference defaults to four threads; VISION_CPU_THREADS can override it between one and eight. Image processing may take tens of seconds on a CPU, especially in enhanced mode.
