@@ -81,6 +81,26 @@ def reset_student(uid:int,actor:c.User=Depends(c.admin),s:Session=Depends(c.db))
     temporary=secrets.token_urlsafe(14);u.password=c.ph.hash(temporary);u.must_change=True
     s.execute(delete(c.LoginSession).where(c.LoginSession.user_id==uid));audit(s,actor,'student.password_reset',uid);s.commit()
     return {'usn':u.usn,'name':u.name,'temporary_password':temporary}
+class DeleteStudentInput(BaseModel):
+    confirm_usn:str=Field(min_length=1,max_length=80)
+@router.delete('/students/{uid}')
+def delete_student(uid:int,data:DeleteStudentInput,actor:c.User=Depends(c.admin),s:Session=Depends(c.db)):
+    user=s.get(c.User,uid)
+    if not user or user.role!='student':raise HTTPException(404,'Student not found.')
+    if data.confirm_usn.strip().upper()!=user.usn:raise HTTPException(400,'Enter the student USN exactly to confirm deletion.')
+    published=s.scalar(select(c.Exam.id).join(c.Enrollment,c.Enrollment.exam_id==c.Exam.id).where(c.Enrollment.user_id==uid,c.Exam.published==True))
+    if published is not None:raise HTTPException(409,'This student is linked to a published exam. Unpublish the affected exam before deleting the student, or keep the record archived.')
+    # Removing one enrollment invalidates the whole affected draft seat plan.
+    invalidate(s,'student',uid)
+    s.execute(delete(Attendance).where(Attendance.user_id==uid))
+    s.execute(delete(c.Allocation).where(c.Allocation.user_id==uid))
+    s.execute(delete(c.Enrollment).where(c.Enrollment.user_id==uid))
+    s.execute(delete(c.LoginSession).where(c.LoginSession.user_id==uid))
+    s.execute(delete(StudentSupport).where(StudentSupport.user_id==uid))
+    s.execute(delete(Archived).where(Archived.kind=='student',Archived.record_id==uid))
+    audit(s,actor,'student.deleted',uid)
+    s.delete(user);s.commit()
+    return {'ok':True}
 class Slot(BaseModel):
     row:int=Field(ge=1,le=20)
     bench:int=Field(ge=1,le=12)
