@@ -34,7 +34,7 @@ services:
       FRONTEND_ORIGINS: http://localhost:8080,http://127.0.0.1:8080
       COOKIE_SECURE: 'false'
       GROQ_API_KEY: ${GROQ_API_KEY:-}
-      GROQ_MODEL: ${GROQ_MODEL:-llama-3.3-70b-versatile}
+      GROQ_MODEL: ${GROQ_MODEL:-openai/gpt-oss-20b}
       HF_HOME: /models
       LANGSMITH_TRACING: 'false'
     volumes:

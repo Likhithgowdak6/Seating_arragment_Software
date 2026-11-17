@@ -8,6 +8,8 @@ from sqlalchemy import select
 from backend import main as c
 from backend.extensions import is_archived,room_public
 router=APIRouter(prefix='/api/assistant')
+DEFAULT_MODEL='openai/gpt-oss-20b'
+def configured_model():return os.getenv('GROQ_MODEL','').strip() or DEFAULT_MODEL
 class Draft(BaseModel):
     name:str=Field(max_length=160)
     starts:str=Field(description='ISO datetime with numeric timezone offset')
@@ -21,7 +23,7 @@ class Reply(BaseModel):
 class Chat(BaseModel):message:str=Field(min_length=1,max_length=3000)
 @router.get('/status')
 def status(_:c.User=Depends(c.admin)):
-    return {'configured':bool(os.getenv('GROQ_API_KEY')),'provider':'Groq','model':os.getenv('GROQ_MODEL','llama-3.3-70b-versatile')}
+    return {'configured':bool(os.getenv('GROQ_API_KEY')),'provider':'Groq','model':configured_model()}
 @router.post('/chat')
 def chat(data:Chat,_:c.User=Depends(c.admin),s:Session=Depends(c.db)):
     if not os.getenv('GROQ_API_KEY'):raise HTTPException(503,'Add GROQ_API_KEY to your local .env and restart the backend to activate the assistant.')
@@ -32,9 +34,10 @@ def chat(data:Chat,_:c.User=Depends(c.admin),s:Session=Depends(c.db)):
     try:
         from langchain_groq import ChatGroq
         from langchain_core.messages import SystemMessage,HumanMessage
-        model=ChatGroq(model=os.getenv('GROQ_MODEL','llama-3.3-70b-versatile'),temperature=0,timeout=45,max_retries=1,max_tokens=1800)
-        planner=model.with_structured_output(Reply,method='function_calling')
-        reply=planner.invoke([SystemMessage(content='You are SmartSeat teacher assistant. Answer simply using the trusted campus summary below. No student identity or password is available. You cannot publish, reset passwords, delete, or change data. To prepare an exam, return a DRAFT only when the user supplies a date, time and actual paper codes for selected branches. Ask for missing information. Never assume branch equals paper. Use Asia/Kolkata unless the user specifies another timezone. Reject unsupported requests honestly. Classroom capacity does not prove seating feasibility. The teacher reviews your proposal before creating a draft through the seating solver. Campus summary: '+json.dumps(context)),HumanMessage(content=data.message)])
+        settings={'reasoning_effort':'low'} if configured_model().startswith('openai/gpt-oss-') else {}
+        model=ChatGroq(model=configured_model(),temperature=0,timeout=45,max_retries=1,max_tokens=2400,**settings)
+        planner=model.with_structured_output(Reply,method='json_mode')
+        reply=planner.invoke([SystemMessage(content='Return only a JSON object matching this response schema: '+json.dumps(Reply.model_json_schema())+'\nYou are SmartSeat teacher assistant. Answer simply using the trusted campus summary below. No student identity or password is available. You cannot publish, reset passwords, delete, or change data. To prepare an exam, return a DRAFT only when the user supplies a date, time and actual paper codes for selected branches. Ask for missing information. Never assume branch equals paper. Use Asia/Kolkata unless the user specifies another timezone. Reject unsupported requests honestly. Classroom capacity does not prove seating feasibility. The teacher reviews your proposal before creating a draft through the seating solver. Campus summary: '+json.dumps(context)),HumanMessage(content=data.message)])
         if reply.draft:
             if not reply.draft.branches or any(b not in branches for b in reply.draft.branches):raise ValueError('Invalid branch in model proposal')
             if any(not reply.draft.paper_codes.get(b,'').strip() for b in reply.draft.branches):raise ValueError('Missing paper code')
@@ -44,7 +47,12 @@ def chat(data:Chat,_:c.User=Depends(c.admin),s:Session=Depends(c.db)):
     except Exception as exc:
         import logging
         logging.getLogger(__name__).warning('Assistant request failed (%s)',type(exc).__name__)
-        raise HTTPException(502,'The assistant could not produce a valid response. Check your Groq configuration or try a clearer request.')
+        status=getattr(exc,'status_code',None)
+        if status==404:raise HTTPException(503,'The configured Groq model is unavailable. Update GROQ_MODEL in .env to an available model, then recreate the backend container.')
+        if status==401:raise HTTPException(503,'Groq rejected the API key. Check GROQ_API_KEY in your local .env and recreate the backend container.')
+        if status==403:raise HTTPException(503,'Your Groq account cannot access this model. Choose a permitted GROQ_MODEL in .env.')
+        if status==429:raise HTTPException(429,'Groq rate limit reached. Wait a moment and try again.')
+        raise HTTPException(502,'The assistant could not produce a valid response. Try again, or check the backend connection to Groq.')
 class Prepare(BaseModel):draft:Draft
 @router.post('/prepare')
 def prepare(data:Prepare,actor:c.User=Depends(c.admin),s:Session=Depends(c.db)):
