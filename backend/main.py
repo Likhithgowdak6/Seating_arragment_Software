@@ -3,7 +3,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError, InvalidHashError
-from fastapi import FastAPI, Depends, HTTPException, Request, Response, UploadFile, File
+from fastapi import FastAPI, Depends, HTTPException, Request, Response, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -399,11 +399,11 @@ def setup(data:SetupInput,s:Session=Depends(db)):
     return {'usn':'ADMIN'}
 
 @app.post('/api/rooms/detect-photo')
-def detect_photo(file:UploadFile=File(...),_:User=Depends(admin)):
+def detect_photo(file:UploadFile=File(...),confidence:float=Form(.2,ge=.1,le=.6),enhanced:bool=Form(True),room_type:str=Form('classroom',pattern='^(classroom|computer_lab|benches)$'),_:User=Depends(admin)):
     raw=file.file.read(8_000_001)
     if len(raw)>8_000_000:raise HTTPException(400,'Photo must be under 8 MB.')
     from backend.vision import detect
-    return detect(raw)
+    return detect(raw,confidence=confidence,enhanced=enhanced,room_type=room_type)
 
 from backend.extensions import (router as management_router, is_archived, required_students, grid, attach_layout, room_public, room_config, validate_extended)
 app.include_router(management_router)

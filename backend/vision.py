@@ -1,5 +1,5 @@
 """Local pretrained detection; photos are processed in memory, never sent to an AI API."""
-import io, threading
+import io, os, threading
 from PIL import Image, ImageOps, UnidentifiedImageError
 from fastapi import HTTPException
 MODEL_ID='IDEA-Research/grounding-dino-tiny'
@@ -11,26 +11,53 @@ def load_model():
     global _processor,_model
     if _model is None:
         from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-        processor=AutoProcessor.from_pretrained(MODEL_ID)
-        model=AutoModelForZeroShotObjectDetection.from_pretrained(MODEL_ID)
+        import torch
+        from huggingface_hub import snapshot_download
+        torch.set_num_threads(max(1,min(8,int(os.getenv('VISION_CPU_THREADS','4')))))
+        try:
+            source=snapshot_download(MODEL_ID,local_files_only=True)
+            from pathlib import Path
+            if not (Path(source)/'model.safetensors').is_file():raise FileNotFoundError()
+        except (OSError,FileNotFoundError):
+            source=snapshot_download(MODEL_ID,allow_patterns=['*.json','*.txt','*.safetensors'],max_workers=2)
+        processor=AutoProcessor.from_pretrained(source,local_files_only=True)
+        model=AutoModelForZeroShotObjectDetection.from_pretrained(source,local_files_only=True)
         model.eval()
         _processor,_model=processor,model
     return _processor,_model
 
 def remove_duplicates(detections):
+    # IoU suppresses repeated predictions while retaining small rear desks that
+    # may lie inside a much larger foreground prediction in perspective views.
     kept=[]
-    for d in sorted(detections,key=lambda b:b['score'],reverse=True):
+    for d in sorted(detections,key=lambda box:box['score'],reverse=True):
         x1,y1,x2,y2=d['box'];area=max(0,x2-x1)*max(0,y2-y1)
         if area<=0:continue
         duplicate=False
         for k in kept:
             a,b,c,e=k['box'];intersection=max(0,min(x2,c)-max(x1,a))*max(0,min(y2,e)-max(y1,b))
-            other=(c-a)*(e-b)
-            if intersection/max(min(area,other),1e-9)>.75:duplicate=True;break
+            other_area=(c-a)*(e-b);union=area+other_area-intersection
+            # A tabletop-only box and a whole-desk box often share the same top
+            # edge. Collapse those, while retaining separate lower/front desks.
+            same_top=abs(y1-b)<.15*max(min(y2-y1,e-b),1e-9)
+            contained=intersection/max(min(area,other_area),1e-9)>.85
+            if intersection/max(union,1e-9)>.5 or (same_top and contained):duplicate=True;break
         if not duplicate:kept.append(d)
-    return kept
+    filtered=[]
+    for d in kept:
+        x1,y1,x2,y2=d['box'];area=(x2-x1)*(y2-y1)
+        contained=0
+        for other in kept:
+            if other is d or other['score']<d['score']:continue
+            a,b,c,e=other['box'];cx=(a+c)/2;cy=(b+e)/2
+            if (c-a)*(e-b)<area*.65 and x1<cx<x2 and y1<cy<y2:contained+=1
+        # Weak predictions encompassing several stronger individual desks are
+        # likely a group/table row, not an additional seating unit.
+        if contained<3:filtered.append(d)
+    return filtered[:100]
 
-def detect(raw):
+def detect(raw,confidence=.2,enhanced=True,room_type='classroom'):
+    if not .1<=confidence<=.6:raise HTTPException(400,'Confidence must be between 0.1 and 0.6.')
     try:
         with Image.open(io.BytesIO(raw)) as source:
             if source.width*source.height>20_000_000:raise HTTPException(400,'Photo must be under 20 megapixels.')
@@ -41,12 +68,30 @@ def detect(raw):
     try:
         import torch
         processor,model=load_model()
-        inputs=processor(images=image,text='a classroom desk.',return_tensors='pt')
-        with torch.inference_mode():outputs=model(**inputs)
-        result=processor.post_process_grounded_object_detection(outputs,inputs.input_ids,threshold=.3,text_threshold=.25,target_sizes=[image.size[::-1]])[0]
+        prompts={'classroom':'a classroom desk.','computer_lab':'a computer desk.','benches':'a school bench.'}
+        prompt=prompts.get(room_type,prompts['classroom'])
         w,h=image.size
-        boxes=[{'box':[max(0,min(1,float(v)/([w,h,w,h][i]))) for i,v in enumerate(box)],'score':float(score)} for box,score in zip(result['boxes'],result['scores'])]
-        return {'model':MODEL_ID,'target':'classroom desk (one desk-and-bench unit)','boxes':remove_duplicates(boxes),'warning':'Suggestions only. Confirm one box per desk-and-bench unit, room orientation, rows and seat capacity.'}
+        regions=[(0,0,w,h)]
+        if enhanced:
+            # Perspective makes far desks small: zoom both sides of the upper
+            # 65% of the image rather than guessing a count from monitors.
+            regions.extend([(0,0,int(w*.55),int(h*.65)),(int(w*.45),0,w,int(h*.65))])
+        candidates=[]
+        for left,top,right,bottom in regions:
+            crop=image.crop((left,top,right,bottom))
+            inputs=processor(images=crop,text=prompt,return_tensors='pt')
+            with torch.inference_mode():outputs=model(**inputs)
+            result=processor.post_process_grounded_object_detection(outputs,inputs.input_ids,threshold=confidence,text_threshold=.2,target_sizes=[crop.size[::-1]])[0]
+            for box,score in zip(result['boxes'],result['scores']):
+                x1,y1,x2,y2=[float(v) for v in box]
+                # Avoid counting a desk fragment created by an interior crop edge.
+                if left>0 and x1<crop.width*.015:continue
+                if right<w and x2>crop.width*.985:continue
+                if bottom<h and y2>crop.height*.985:continue
+                mapped=[max(0,min(1,(x1+left)/w)),max(0,min(1,(y1+top)/h)),max(0,min(1,(x2+left)/w)),max(0,min(1,(y2+top)/h))]
+                candidates.append({'box':mapped,'score':float(score)})
+        return {'model':MODEL_ID,'target':prompt,'boxes':remove_duplicates(candidates),'passes':len(regions),'confidence':confidence,'warning':'AI suggestions, not a verified count. Zoomed crops can still miss or duplicate desks. Review every box before confirming room capacity.'}
+
     except HTTPException:raise
     except Exception as exc:
         import logging
